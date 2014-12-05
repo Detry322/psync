@@ -4,10 +4,8 @@ import round._
 import round.runtime._
 import round.utils.Timer
 
-import io.netty.buffer.ByteBuf
-import io.netty.channel._
-import io.netty.channel.socket._
 import io.netty.util.{TimerTask, Timeout}
+import java.nio.channels.DatagramChannel
 
 import dzufferey.utils.Logger
 import dzufferey.utils.LogLevel._
@@ -21,7 +19,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock
 class ToPredicateFineGrained(
       grp: Group,
       instance: Short,
-      channel: Channel,
+      channel: DatagramChannel,
       dispatcher: InstanceDispatcher,
       proc: Process,
       options: Map[String, String] = Map.empty
@@ -84,38 +82,37 @@ class ToPredicateFineGrained(
     }
   }
 
-  override protected def normalReceive(pkt: DatagramPacket) {
-    val id = grp.inetToId(pkt.sender).id
+  override protected def normalReceive(m: Message) {
+    val id = m.senderId.id
     //protect from duplicate packet
     if (!from2(id).getAndSet(true)) {
       val r = _received2.getAndIncrement()
-      messages(r) = pkt
+      messages(r) = m
       if (r >= expected) {
         deliver
       }
     } else {
-      pkt.release
+      m.release
     }
     changed = true
   }
 
-  override def receive(pkt: DatagramPacket) {
-    val tag = Message.getTag(pkt.content)
-    val round = tag.roundNbr
+  override def receive(m: Message) {
+    val round = m.round
     lock2.readLock.lock
     try {
       if(round == currentRound) {
-        normalReceive(pkt)
+        normalReceive(m)
       } else if (round > currentRound) {
         //we are late, need to catch up
         for (i <- currentRound until round) {
           deliver //TODO skip the sending ?
         }
         //then back to normal
-        normalReceive(pkt)
+        normalReceive(m)
       } else {
         //late message, drop it
-        pkt.release
+        m.release
       }
     } finally {
       lock2.readLock.unlock

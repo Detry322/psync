@@ -2,8 +2,7 @@ package round.runtime
 
 import round._
 import round.predicate._
-import io.netty.buffer.ByteBuf
-import io.netty.channel.socket._
+import java.nio.ByteBuffer
 import dzufferey.utils.LogLevel._
 import dzufferey.utils.Logger
 
@@ -15,6 +14,8 @@ class RunTime[IO](val alg: Algorithm[IO]) {
   private var options = Map.empty[String, String]
 
   private var defltHandler: Message => Unit = null
+  
+  private var allocator: ByteBufferPool = null
 
   /** Start an instance of the algorithm. */
   def startInstance(
@@ -29,6 +30,7 @@ class RunTime[IO](val alg: Algorithm[IO]) {
         val grp = s.directory.group
         val process = alg.process(grp.self, io)
         process.setGroup(grp)
+        process.allocateResources(allocator)
         process.postInit
         val predicate = new ToPredicate(grp, instanceId, s.channel, s.dispatcher, process, options)
         //register the instance and send the first round of messages
@@ -36,7 +38,7 @@ class RunTime[IO](val alg: Algorithm[IO]) {
         //msg that are already received
         for(m <- messages) {
           if (!Flags.userDefinable(m.flag) && m.flag != Flags.dummy) {
-            predicate.receive(m.packet)
+            predicate.receive(m)
           } else {
             m.release
           }
@@ -72,12 +74,14 @@ class RunTime[IO](val alg: Algorithm[IO]) {
     val me = new ProcessID(options("id").toShort)
     val grp = Group(me, peers)
 
+    allocator = ByteBufferPool.apply() //TODO use option to modify the allocator
+
     //start the server
     val port = 
       if (grp contains me) grp.get(me).port
       else options("port").toInt
     Logger("RunTime", Info, "starting service on port " + port)
-    val pktSrv = new PacketServer(port, grp, defaultHandler, options)
+    val pktSrv = new PacketServer(port, grp, allocator, defaultHandler, options)
     srv = Some(pktSrv)
     pktSrv.start
   }
@@ -103,32 +107,34 @@ class RunTime[IO](val alg: Algorithm[IO]) {
       case None =>
     }
     srv = None
+    executor.shutdownNow
   }
+  
+  //for additional tasks
+  private val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
+  //private val executor = java.util.concurrent.Executors.newCachedThreadPool()
 
   def submitTask[T](fct: () => T) = {
     assert(srv.isDefined)
-    srv.get.submitTask(new java.util.concurrent.Callable[T]{
+    executor.submit(new java.util.concurrent.Callable[T]{
       def call: T = fct()
     })
   }
 
   /** the first 8 bytes of the payload must be empty */
-  def sendMessage(dest: ProcessID, tag: Tag, payload: ByteBuf) = {
+  def sendMessage(dest: ProcessID, tag: Tag, payload: ByteBuffer => Unit) = {
     assert(Flags.userDefinable(tag.flag) || tag.flag == Flags.dummy) //TODO in the long term, we might want to remove the dummy
     assert(srv.isDefined)
     val grp = srv.get.directory
     val dst = grp.idToInet(dest)
-    payload.setLong(0, tag.underlying)
-    val pkt =
-      if (grp.contains(grp.self)) {
-        val src = grp.idToInet(grp.self)
-        new DatagramPacket(payload, dst, src)
-      } else {
-        new DatagramPacket(payload, dst)
-      }
+    val buffer = allocator.get
+    buffer.putLong(tag.underlying)
+    payload(buffer)
+    buffer.flip
     val channel = srv.get.channel
-    channel.write(pkt, channel.voidPromise())
-    channel.flush
+    channel.send(buffer, dst)
+    allocator.recycle(buffer)
+    //channel.flush
   }
 
   def directory = {

@@ -4,10 +4,8 @@ import round._
 import round.runtime._
 import round.utils.Timer
 
-import io.netty.buffer.ByteBuf
-import io.netty.channel._
-import io.netty.channel.socket._
 import io.netty.util.{TimerTask, Timeout}
+import java.nio.channels.DatagramChannel
 
 import dzufferey.utils.Logger
 import dzufferey.utils.LogLevel._
@@ -19,7 +17,7 @@ import java.util.concurrent.locks.ReentrantLock
 class ToPredicate(
       grp: Group,
       instance: Short,
-      channel: Channel,
+      channel: DatagramChannel,
       dispatcher: InstanceDispatcher,
       proc: Process,
       options: Map[String, String] = Map.empty
@@ -139,42 +137,42 @@ class ToPredicate(
   }
 
   
-  protected def normalReceive(pkt: DatagramPacket) {
+  protected def normalReceive(m: Message) {
     assert(lock.isHeldByCurrentThread, "lock.isHeldByCurrentThread")
-    val id = grp.inetToId(pkt.sender).id
+    val id = m.senderId.id
     //protect from duplicate packet
     if (!from(id) && active) {
       from(id) = true
-      messages(received) = pkt
+      messages(_received) = m
       _received += 1
-      if (received >= expected) {
+      if (_received >= expected) {
         deliver
       }
       changed = true
     } else {
-      pkt.release
+      m.release
     }
   }
 
-  def receive(pkt: DatagramPacket) {
-    val tag = Message.getTag(pkt.content)
-    val round = tag.roundNbr
+  def receive(m: Message) {
+    val round = m.round
     lock.lock()
     try {
       //TODO take round overflow into account
+
+      //we are late, need to catch up
+      //then back to normal
+      while(currentRound < round) {
+        deliver //TODO skip the sending ?
+      }
+
       if(round == currentRound) {
-        normalReceive(pkt)
-      } else if (round > currentRound) {
-        //we are late, need to catch up
-        while(currentRound < round) {
-          deliver //TODO skip the sending ?
-        }
-        //then back to normal
-        normalReceive(pkt)
+        normalReceive(m)
       } else {
         //late message, drop it
-        pkt.release
+        m.release
       }
+
     } finally {
       lock.unlock()
     }

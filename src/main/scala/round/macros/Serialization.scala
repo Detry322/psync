@@ -13,32 +13,28 @@ trait Serialization {
   
   
   def picklingIO(tpt: Tree) = List(
-      q"""protected def serialize(payload: $tpt, out: _root_.io.netty.buffer.ByteBuf, offset: Int = 8) {
+      q"""protected def serialize(payload: $tpt, out: java.nio.ByteBuffer) {
         import scala.pickling._
         import binary._
-        if (offset > 0) out.writerIndex(out.writerIndex() + offset)
         val bytes0 = payload.pickle.value
         val length = bytes0.length
-        out.writeBytes(bytes0)
+        out.put(bytes0)
       }""",
-      q"""protected def deserialize(in: _root_.io.netty.buffer.ByteBuf, offset: Int = 8): $tpt = {
+      q"""protected def deserialize(in: java.nio.ByteBuffer): $tpt = {
         import scala.pickling._
         import binary._
-        if (offset > 0) in.readerIndex(in.readerIndex() + offset)
-        val length = in.readableBytes()
+        val length = in.remaining()
         val bytes = Array.ofDim[Byte](length)
-        in.readBytes(bytes)
+        in.get(bytes)
         BinaryPickle(bytes).unpickle[$tpt]
       }"""
     )
 
   def primitiveIO(tpt: Tree, write: List[Tree], read: List[Tree]) = List(
-      q"""protected def serialize(payload: $tpt, out: _root_.io.netty.buffer.ByteBuf, offset: Int = 8) = {
-        if (offset > 0) out.writerIndex(out.writerIndex() + offset)
+      q"""protected def serialize(payload: $tpt, out: java.nio.ByteBuffer) {
         ..$write
       }""",
-      q"""protected def deserialize(in: _root_.io.netty.buffer.ByteBuf, offset: Int = 8): $tpt = {
-        if (offset > 0) in.readerIndex(in.readerIndex() + offset)
+      q"""protected def deserialize(in: java.nio.ByteBuffer): $tpt = {
         ..$read
       }"""
   )
@@ -58,21 +54,21 @@ trait Serialization {
   def primitiveRead(t: Type): Tree = {
     import definitions._
     if (t =:= BooleanTpe) {
-      q"in.readBoolean()"
+      q"in.get() != (0: Byte)"
     } else if (t =:= ByteTpe) {
-      q"in.readByte()"
+      q"in.get()"
     } else if (t =:= CharTpe) {
-      q"in.readChar()"
+      q"in.getChar()"
     } else if (t =:= ShortTpe) {
-      q"in.readShort()"
+      q"in.getShort()"
     } else if (t =:= IntTpe) {
-      q"in.readInt()"
+      q"in.getInt()"
     } else if (t =:= LongTpe) {
-      q"in.readLong()"
+      q"in.getLong()"
     } else if (t =:= FloatTpe) {
-      q"in.readFloat()"
+      q"in.getFloat()"
     } else if (t =:= DoubleTpe) {
-      q"in.readDouble()"
+      q"in.getDouble()"
     } else {
       sys.error("not primitive")
     }
@@ -81,21 +77,21 @@ trait Serialization {
   def primitiveWrite(t: Type, value: Tree): Tree = {
     import definitions._
     if (t =:= BooleanTpe) {
-      q"out.writeBoolean($value)"
+      q"if ($value) out.put(1: Byte) else out.put(0: Byte)"
     } else if (t =:= ByteTpe) {
-      q"out.writeByte($value)"
+      q"out.put($value)"
     } else if (t =:= CharTpe) {
-      q"out.writeChar($value)"
+      q"out.putChar($value)"
     } else if (t =:= ShortTpe) {
-      q"out.writeShort($value)"
+      q"out.putShort($value)"
     } else if (t =:= IntTpe) {
-      q"out.writeInt($value)"
+      q"out.putInt($value)"
     } else if (t =:= LongTpe) {
-      q"out.writeLong($value)"
+      q"out.putLong($value)"
     } else if (t =:= FloatTpe) {
-      q"out.writeFloat($value)"
+      q"out.putFloat($value)"
     } else if (t =:= DoubleTpe) {
-      q"out.writeDouble($value)"
+      q"out.putDouble($value)"
     } else {
       sys.error("not primitive")
     }

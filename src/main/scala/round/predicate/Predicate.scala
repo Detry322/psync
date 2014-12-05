@@ -8,22 +8,20 @@ import dzufferey.utils.Logger
 import dzufferey.utils.LogLevel._
 
 import scala.reflect.ClassTag
-import io.netty.buffer.ByteBuf
-import io.netty.channel._
-import io.netty.channel.socket._
+import java.nio.ByteBuffer
+import java.nio.channels.DatagramChannel
+import java.net.InetSocketAddress
 import java.util.concurrent.locks.ReentrantLock
 
 abstract class Predicate(
       val grp: Group,
       val instance: Short,
-      channel: Channel,
-      dispatcher: InstanceDispatcher,
+      channel: DatagramChannel,
+      dispatcher: InstanceDispatcher, //TODO simpler way of registering with the dispatcher (reduce number of args)
       proc: Process,
       options: Map[String, String] = Map.empty
     )
 {
-
-  //TODO the expected # of msg
 
   //what does it guarantee
   val ensures: Formula
@@ -36,29 +34,29 @@ abstract class Predicate(
 
   //general receive (not sure if it is the correct round).
   //vanilla implementation looks like:
-  //  val round = Message.getTag(pkt.content).roundNbr
+  //  val round = Message.getTag(payload).roundNbr
   //  if (round >= currentRound) {
   //    //we are late, need to catch up
   //    while(currentRound < round) { deliver }
-  //    normalReceive(pkt)
+  //    normalReceive(src, payload)
   //  } // else: this is a late message, drop it
-  def receive(pkt: DatagramPacket): Unit
+  def receive(m: Message): Unit
 
   //for messages that we know already belong to the current round.
   //vanilla implementation looks like:
-  //  val id = grp.inetToId(pkt.sender)
+  //  val id = grp.inetToId(src)
   //  messages(received) = pkt
   //  received += 1
   //  if (received >= expectedNbrMessage) {
   //    deliver
   //  }
-  protected def normalReceive(pkt: DatagramPacket)
+  protected def normalReceive(m: Message)
 
 
   val n = grp.size
   var currentRound = 0
   
-  val messages = Array.ofDim[DatagramPacket](n)
+  val messages = Array.ofDim[Message](n)
   def received: Int
   def resetReceived: Unit
 
@@ -76,16 +74,22 @@ abstract class Predicate(
   protected def deliver {
     lock.lock
     try {
-      //Logger("Predicate", Debug, "delivering for round " + currentRound + " (received = " + received + ")")
-      val toDeliver = messages.slice(0, received)
-      val msgs = fromPkts(toDeliver)
+      //Logger("Predicate", Debug, "instance " + instance +
+      //                           ", delivering for round " + currentRound +
+      //                           ", received = " + received)
+      val msgs = messages.slice(0, received).filter(_ != null)
+      if (msgs.size != received) {
+        Logger("Predicate", Warning,"instance " + instance +
+                                    " round " + currentRound +
+                                    " received: " + msgs.size +
+                                    " instead of " + received)
+      }
       currentRound += 1
       clear
       //push to the layer above
       try {
         //actual delivery
-        val mset = msgs.toSet
-        proc.update(mset)
+        proc.update(msgs)
         afterUpdate
         //start the next round (if has not exited)
         send
@@ -116,17 +120,20 @@ abstract class Predicate(
         }
         idx += 1
       }
+      proc.releaseResources
     } finally {
       lock.unlock
     }
   }
 
   protected def clear {
+    assert(lock.isHeldByCurrentThread, "lock.isHeldByCurrentThread")
     val r = received
     resetReceived
     for (i <- 0 until r) {
       messages(i) = null
     }
+    assert(received == 0)
   }
 
   ////////////////
@@ -136,28 +143,29 @@ abstract class Predicate(
   def send {
     //Logger("Predicate", Debug, "sending for round " + currentRound)
     val myAddress = grp.idToInet(grp.self)
-    val pkts = toPkts(proc.send.toSeq)
+    val pkts = toPkts(proc.send)
     atRoundChange
-    for (pkt <- pkts) {
-      if (pkt.recipient() == myAddress) {
-        normalReceive(pkt)
+    for ((dest, payload) <- pkts) {
+      payload.flip
+      if (dest == myAddress) {
+        normalReceive(new Message(dest, payload, grp, null))
       } else {
-        channel.write(pkt, channel.voidPromise())
+        channel.send(payload, dest)
+        payload.clear
       }
     }
-    channel.flush
     afterSend
   }
 
-  def messageReceived(pkt: DatagramPacket) = {
-    val tag = Message.getTag(pkt.content)
+  def messageReceived(m: Message) = {
+    val tag = m.tag
     assert(instance == tag.instanceNbr)
     if (tag.flag == Flags.normal) {
-      receive(pkt)
+      receive(m)
       true
     } else if (tag.flag == Flags.dummy) {
       Logger("Predicate", Debug, "messageReceived: dummy flag (ignoring)")
-      pkt.release
+      m.release
       true
     } else if (tag.flag == Flags.error) {
       Logger("Predicate", Warning, "messageReceived: error flag (pushing to user)")
@@ -168,25 +176,14 @@ abstract class Predicate(
     }
   }
     
-  protected def toPkts(msgs: Seq[(ProcessID, ByteBuf)]): Seq[DatagramPacket] = {
-    val src = grp.idToInet(grp.self)
+  protected def toPkts(msgs: Iterable[(ProcessID, ByteBuffer)]): Iterable[(InetSocketAddress, ByteBuffer)] = {
     val tag = Tag(instance, currentRound)
     val pkts = msgs.map{ case (dst,buf) =>
       val dst2 = grp.idToInet(dst)
-      buf.setLong(0, tag.underlying)
-      new DatagramPacket(buf, dst2, src)
+      buf.putLong(0, tag.underlying)
+      dst2 -> buf
     }
     pkts
   }
-
-  protected def fromPkts(pkts: Seq[DatagramPacket]): Seq[(ProcessID, ByteBuf)] = {
-    val msgs = pkts.map( pkt => {
-      val src = grp.inetToId(pkt.sender)
-      val buf = pkt.content
-      (src, buf)
-    })
-    msgs
-  }
-
 
 }

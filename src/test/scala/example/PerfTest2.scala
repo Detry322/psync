@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ConcurrentSkipListSet
 import scala.util.Random
-import io.netty.buffer.PooledByteBufAllocator
+import java.nio.ByteBuffer
 
 class PerfTest2(id: Int,
                 confFile: String,
@@ -168,16 +168,14 @@ class PerfTest2(id: Int,
   def sendRecoveryInfo(m: Message) = {
     val inst = m.instance
     val idx = (m.getInt(0) >>> 16).toShort
-    val payload = PooledByteBufAllocator.DEFAULT.buffer()
     val sender = m.senderId
-    payload.writeLong(8)
     var tag = Tag(0,0)
-    getDec(inst) match {
+    val payload: ByteBuffer => Unit = getDec(inst) match {
       case Some(d) =>
         //Logger("PerfTest", Info, "sending decision " + (d >>> 16) + ", " + (d & 0xFFFF).toShort +
         //                         " to " + sender.id + " for instance " + inst)
         tag = Tag(inst,0,Decision,0)
-        payload.writeInt(d)
+        ( (buffer: ByteBuffer) => buffer.putInt(d) )
       case None =>
         val l = lock(idx)
         l.lock
@@ -189,13 +187,15 @@ class PerfTest2(id: Int,
             //Logger("PerfTest", Info, "sending decision " + (d >>> 16) + ", " + (d & 0xFFFF).toShort +
             //                         " to " + sender.id + " for instance " + inst)
             tag = Tag(inst,0,Decision,0)
-            payload.writeInt(d)
+            ( (buffer: ByteBuffer) => buffer.putInt(d) )
           } else {
             //Logger("PerfTest", Info, "sending recovery " + (d >>> 16) + ", " + (d & 0xFFFF).toShort +
             //                         " to " + sender.id + " for instance " + inst + " -> " + currInst)
             tag = Tag(inst,0,Recovery,0)
-            payload.writeInt(d)
-            payload.writeInt(currInst)
+            ( (buffer: ByteBuffer) => {
+              buffer.putInt(d) 
+              buffer.putInt(currInst) 
+            })
           }
         } finally {
           l.unlock
@@ -295,10 +295,8 @@ class PerfTest2(id: Int,
     if (lv) {
       val dir = rt.directory
       for (o <- dir.others) {
-        val payload = PooledByteBufAllocator.DEFAULT.buffer()
-        payload.writeLong(8)
         var tag = Tag(inst,0,Flags.dummy,0)
-        payload.writeInt(initValue)
+        val payload: ByteBuffer => Unit = ( (buffer: ByteBuffer) => buffer.putInt(initValue) )
         rt.sendMessage(o.id, tag, payload)
       }
     }

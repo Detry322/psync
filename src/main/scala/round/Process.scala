@@ -1,5 +1,9 @@
 package round
 
+import java.nio.ByteBuffer
+import runtime.ByteBufferPool
+import runtime.Message
+
 abstract class Process(val id: ProcessID) {
 
   val rounds: Array[Round]
@@ -11,8 +15,9 @@ abstract class Process(val id: ProcessID) {
   //////////////////
 
   def setGroup(g: round.runtime.Group): Unit //defined by macros
+  def groupSize: Int //defined by macros
 
-  //needed to go around the initialization order
+  //needed to work around the initialization order
   def postInit = {
     rounds.foreach(r => r.id = id) //set the id in round
   }
@@ -21,14 +26,37 @@ abstract class Process(val id: ProcessID) {
 
   protected def currentRound: Round //defined by macros
 
-  protected var allocator: io.netty.buffer.ByteBufAllocator = io.netty.buffer.PooledByteBufAllocator.DEFAULT
+  protected var allocator: ByteBufferPool = null
+  protected var sendBuffers: Array[ByteBuffer] = null
 
-  final def send(): Set[(ProcessID, io.netty.buffer.ByteBuf)] = {
-    incrementRound
-    currentRound.packSend(allocator)
+  def allocateResources(pool: ByteBufferPool) = {
+    allocator = pool
+    var n = groupSize
+    sendBuffers = Array.ofDim[ByteBuffer](n)
+    while(n > 0) {
+      n -= 1
+      sendBuffers(n) = pool.get
+    }
   }
 
-  final def update(msgs: Set[(ProcessID, io.netty.buffer.ByteBuf)]) {
+  def releaseResources = {
+    if (allocator != null) {
+      sendBuffers.foreach(allocator.recycle(_))
+      allocator = null
+      sendBuffers = null
+    }
+  }
+
+  override def finalize {
+    releaseResources
+  }
+
+  final def send(): Iterable[(ProcessID, ByteBuffer)] = {
+    incrementRound
+    currentRound.packSend(sendBuffers)
+  }
+
+  final def update(msgs: Iterable[Message]) {
     currentRound.unpackUpdate(msgs)
   }
 

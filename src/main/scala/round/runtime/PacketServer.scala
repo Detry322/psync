@@ -4,61 +4,47 @@ import round._
 import dzufferey.utils.Logger
 import dzufferey.utils.LogLevel._
 
-import io.netty.buffer._
-import io.netty.channel._
-import io.netty.channel.socket._
-import io.netty.channel.nio._
-import io.netty.channel.socket.nio._
-import io.netty.channel.epoll._
-import io.netty.bootstrap.Bootstrap
 import java.net.InetSocketAddress
+import java.nio.channels.DatagramChannel
+import java.nio.ByteBuffer
+
 
 class PacketServer(
     port: Int,
     initGroup: Group,
-    defaultHandler: Message => Unit, //defaultHandler is responsible for releasing the ByteBuf payload
+    allocator: ByteBufferPool,
+    defaultHandler: Message => Unit, //defaultHandler is responsible for releasing the ByteBuffer payload
     options: Map[String, String] = Map.empty)
 {
 
   val directory = new Directory(initGroup)
 
-  val epoll = {
-    val g = options.getOrElse("group", "nio").toLowerCase
-    if (g == "epoll") {
-      true
-    } else if (g == "nio") {
-      false
-    } else {
-      Logger("PacketServer", Warning, "event group is unknown, using nio instead")
-      false
-    }
-  }
-    
   if (options.getOrElse("transport layer", "udp").toLowerCase != "udp") {
-     Logger("PacketServer", Warning, "transport layer: only UDP supported for the moment")
+    Logger("PacketServer", Warning, "transport layer: only UDP supported for the moment")
   }
 
-  private val executor = java.util.concurrent.Executors.newCachedThreadPool()
-  //private val executor = java.util.concurrent.Executors.newFixedThreadPool(8)
+  private var chan = DatagramChannel.open()
+  def channel: DatagramChannel = chan
 
-  private val group: EventLoopGroup =
-    if (epoll) new EpollEventLoopGroup()
-    else new NioEventLoopGroup()
+  val dispatcher = new InstanceDispatcher(defaultHandler, directory)
 
-  def submitTask[T](task: java.util.concurrent.Callable[T]) = {
-    executor.submit(task)
+  private var receiverTask = new Receiver(channel, dispatcher, allocator)
+  private var receiver = new Thread(receiverTask)
+  private var nbrWorkers = 16 //TODO the size as a fct of the CPU
+  private val workers = Array.ofDim[Thread](nbrWorkers)
+  private val workerTasks = Array.ofDim[InstanceDispatcherWorker](nbrWorkers)
+  for (i <- 0 until nbrWorkers) {
+    val t = dispatcher.workerTask
+    workerTasks(i) = t
+    workers(i) = new Thread(t)
   }
-
-  private var chan: Channel = null
-  def channel: Channel = chan
-
-  val dispatcher = new InstanceDispatcher(executor, defaultHandler, directory)
 
   def close {
-    dispatcher.clear
     try {
-      group.shutdownGracefully
-      executor.shutdownNow
+      dispatcher.clear
+      receiverTask.running = false
+      workerTasks.foreach(_.running = false)
+      Thread.sleep(10) //let the guys terminate
     } finally {
       if (chan != null) {
         chan.close
@@ -68,35 +54,36 @@ class PacketServer(
   }
 
   def start {
-    try {
-      val b = new Bootstrap();
-      b.group(group)
-        .channel(if (epoll) classOf[EpollDatagramChannel]
-                 else classOf[NioDatagramChannel])
-        .handler(new PackerServerHandler(dispatcher))
+    //channel.bind(new InetSocketAddress("127.0.0.1", port))
+    channel.bind(new InetSocketAddress(port))
+    workers.foreach(_.start)
+    receiver.start
+  }
 
-      chan = b.bind(port).sync().channel()
-      //chan.closeFuture().await() //closeFuture is a notification when the channel is closed
-    } finally {
-      //close
+}
+
+class Receiver(channel: DatagramChannel,
+               dispatcher: InstanceDispatcher,
+               allocator: ByteBufferPool) extends Runnable {
+
+  @volatile var running = true
+
+  def run {
+    try {
+      while(running) {
+        val buffer = allocator.get
+        val addr = channel.receive(buffer)
+        buffer.flip
+        val msg = new Message(addr.asInstanceOf[InetSocketAddress], buffer, null, allocator)
+        dispatcher.dispatch(msg)
+      }
+    } catch {
+      case _ : java.nio.channels.AsynchronousCloseException =>
+        ()
+      case e: Exception =>
+        Logger("PacketServer", Error, e.toString)
+        throw e
     }
   }
 
 }
-
-class PackerServerHandler(
-    dispatcher: InstanceDispatcher
-  ) extends SimpleChannelInboundHandler[DatagramPacket](false) {
-
-  //in Netty version 5.0 will be called: channelRead0 will be messageReceived
-  override def channelRead0(ctx: ChannelHandlerContext, pkt: DatagramPacket) {
-    dispatcher.dispatch(pkt)
-  }
-
-  override def exceptionCaught(ctx: ChannelHandlerContext, cause: Throwable) {
-    cause.printStackTrace()
-  }
-
-}
-
-

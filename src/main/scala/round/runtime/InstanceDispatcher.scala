@@ -4,14 +4,15 @@ import round.predicate.Predicate
 import dzufferey.utils.Logger
 import dzufferey.utils.LogLevel._
 
-import io.netty.channel.socket._
+import java.net.InetSocketAddress
+import java.nio.ByteBuffer
 import java.util.concurrent.locks.ReentrantLock
+import java.util.concurrent.ArrayBlockingQueue
 
 /** a dispatcher that scales better than putting all the instance in the pipeline */
 class InstanceDispatcher(
-    executor: java.util.concurrent.Executor,
-    defaultHandler: Message => Unit,
-    dir: Directory,
+    val defaultHandler: Message => Unit,
+    val dir: Directory,
     options: Map[String, String] = Map.empty)
 {
 
@@ -92,45 +93,43 @@ class InstanceDispatcher(
     }
   }
 
-  /** call the default handler */
-  private def default(pkt: DatagramPacket) {
-    val msg = new Message(pkt, dir.group)
-    defaultHandler(msg)
+  private val messageQueue = new ArrayBlockingQueue[Message](1024)
+
+  def workerTask = new InstanceDispatcherWorker(this, messageQueue)
+
+  //assumes the msg.dir == null, the group will be filled when dispatching
+  def dispatch(msg: Message) {
+    messageQueue.put(msg)
   }
 
-  private val messageQueue = new java.util.concurrent.ArrayBlockingQueue[DatagramPacket](1024)
+}
 
-  private val localDispatch = new Runnable {
-    def run {
-      while(true) {
-        val pkt = messageQueue.take
-        executor.execute(new Runnable {
-          def run {
-            try {
-              val tag = Message.getTag(pkt.content)
-              findInstance(tag.instanceNbr) match {
-                case Some(inst) =>
-                  if (!inst.messageReceived(pkt))
-                    default(pkt)
-                case None => 
-                  default(pkt)
-              }
-            } catch {
-              case e: Exception =>
-                Logger("InstanceDispatcher", Warning, "got " + e + "\n  " + e.getStackTrace.mkString("\n  "))
-            }
-          }
-        })
+class InstanceDispatcherWorker(dispatcher: InstanceDispatcher, queue: ArrayBlockingQueue[Message]) extends Runnable {
+
+  @volatile var running = true
+
+  def run {
+    while(running) {
+      var i: Short = 0
+      try {
+        val msg = queue.take
+        i = msg.instance
+        dispatcher.findInstance(i) match {
+          case Some(inst) =>
+            msg.dir = inst.grp
+            if (!inst.messageReceived(msg))
+              dispatcher.defaultHandler(msg)
+          case None => 
+            msg.dir = dispatcher.dir.group
+            dispatcher.defaultHandler(msg)
+        }
+      } catch {
+        case _:  java.nio.channels.ClosedChannelException =>
+          running = false
+        case e: Exception =>
+          Logger("InstanceDispatcher", Warning, "instance " + i+ ", got " + e + "\n  " + e.getStackTrace.mkString("\n  "))
       }
     }
-  }
-
-  private val t1 = new Thread(localDispatch)
-  t1.setDaemon(true)
-  t1.start()
-
-  def dispatch(pkt: DatagramPacket) {
-    messageQueue.put(pkt)
   }
 
 }

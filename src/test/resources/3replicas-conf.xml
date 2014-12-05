@@ -5,7 +5,6 @@
   <parameters>
     <param> <name>transport layer</name> <value>UDP</value> </param>
     <param> <name>timeout</name> <value>100</value> </param>
-    <param> <name>group</name> <value>nio</value> </param>
   </parameters>
   <peers>
     <replica> <id>0</id> <address>127.0.0.1</address> <port>4444</port> </replica>

@@ -2,13 +2,13 @@ package example
 
 import round._
 import round.runtime._
-import round.utils.ByteBufAllocator
 import dzufferey.utils.Logger
 import dzufferey.utils.LogLevel._
 import dzufferey.arg._
 import java.util.concurrent.Semaphore
 import java.util.concurrent.locks.ReentrantLock
 import scala.util.Random
+import java.nio.ByteBuffer
 
 object PerfTest extends round.utils.DefaultOptions with DecisionLog[scala.Int] {
   
@@ -94,14 +94,11 @@ object PerfTest extends round.utils.DefaultOptions with DecisionLog[scala.Int] {
           
   def trySendDecision(inst: Short, senderId: ProcessID) = {
     Logger("PerfTest", Info, inst + " sending recovery to " + senderId)
-    val payload = ByteBufAllocator.buffer(16)
-    payload.writeLong(8)
-    val tag = getDec(inst) match {
+    val (tag, payload: (ByteBuffer => scala.Unit)) = getDec(inst) match {
       case Some(d) =>
-        payload.writeInt(d)
-        Tag(inst,0,Decision,0)
+        (Tag(inst,0,Decision,0), ( (buffer: ByteBuffer) => buffer.putInt(d) ))
       case None =>
-        Tag(inst,0,TooLate,0)
+        (Tag(inst,0,TooLate,0), ( (buffer: ByteBuffer) => () ))
     }
     rt.sendMessage(senderId, tag, payload)
   }
