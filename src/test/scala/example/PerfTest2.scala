@@ -66,7 +66,7 @@ class PerfTest2(options: RuntimeOptions,
       //println("(0) id: " + id + " idx: " + idx + ", instance: " + msg.instance + ", round:" + msg.round)
       val v2 = backOff(idx).poll
       val v = if (v2 != 0) v2 else (value & 0xFFFF).toShort
-      start(idx, v, v2 != 0, Set(msg))
+      start(idx, v, v2 != 0, Some(msg))
 
     } else if (flag == Decision) {
       val inst = msg.instance
@@ -74,9 +74,9 @@ class PerfTest2(options: RuntimeOptions,
       val value = msg.getInt(0)
       val idx = (value >>> 16).toShort
       //println("(1) id: " + id + " idx: " + idx + ", instance: " + inst)
+      rt.stopInstance(inst)
       val first = processDecision(inst, value)
       msg.release
-      rt.stopInstance(inst)
       if (first) checkPending(idx) 
 
     } else if (flag == Recovery) {
@@ -86,11 +86,14 @@ class PerfTest2(options: RuntimeOptions,
       val newInstance = msg.getInt(4).toShort
       //println("(2) id: " + id + " idx: " + idx + ", instance: " + inst + ", newInstance: " + newInstance)
       //Logger("PerfTest", Info, inst + " recovery to " + newInstance)
-      assert((inst - newInstance).toShort % nbrValues == 0, "inst = " + inst + ", newInst = " + newInstance)
-      val first = processDecision(inst, value, Some(newInstance)) 
-      msg.release
-      rt.stopInstance(inst)
-      if (first) checkPending(idx) 
+      if ((inst - newInstance).toShort % nbrValues == 0) {
+        rt.stopInstance(inst)
+        val first = processDecision(inst, value, Some(newInstance)) 
+        msg.release
+        if (first) checkPending(idx) 
+      } else {
+        Logger("PerfTest", Warning, id + "@" + inst + " someone is *really* late " + msg.senderId.id + "@" + newInstance)
+      }
 
     } else {
        sys.error("unknown or error flag: " + flag)
@@ -196,7 +199,7 @@ class PerfTest2(options: RuntimeOptions,
   }
 
   /** */
-  def start(idx: Short, value: Short, self: Boolean, _msg: Set[Message]) {
+  def start(idx: Short, value: Short, self: Boolean, _msg: Option[Message]) {
     var canGo = false
     var instanceNbr: Short = 0
     var msg = _msg
@@ -208,78 +211,92 @@ class PerfTest2(options: RuntimeOptions,
       instanceNbr = versions(idx)
 
       //recovery
-      msg = msg.filter( m => {
-        val inst = m.instance
-        if (Instance.leq(inst, instanceNbr)) {
+      msg = msg match {
+        case Some(m) if Instance.leq(m.instance, instanceNbr) =>
           sendRecoveryInfo(m)
           m.release
-          false
-        } else {
-          true
-        }
-      })
+          None
+        case other => other
+      }
 
       instanceNbr = (instanceNbr + nbrValues).toShort
 
       if (running(idx).isEmpty) {
 
         //in case of msg check that we have the right instance!
-        if (!msg.isEmpty) {
-          assert(msg.size == 1)
-          val m = msg.head
-          val inst = m.instance
-          if (Instance.lt(inst, instanceNbr)) {
-            m.release
-            msg = Set()
-          } else {
-            instanceNbr = Instance.max(instanceNbr, inst)
-            canGo = true
-          }
+        msg match {
+          case Some(m) =>
+            val inst = m.instance
+            if (Instance.lt(inst, instanceNbr)) {
+              m.release
+              msg = None
+            } else {
+              instanceNbr = Instance.max(instanceNbr, inst)
+              canGo = true
+            }
+          case None =>
+            ()
         }
 
         canGo = canGo || self
 
-        if (canGo) {
-          //good to go
-          running(idx) = Some(instanceNbr)
+      } else {
+        val r = running(idx).get
+        msg = msg match {
+          case Some(m) =>
+            if (m.instance == r) {
+              //running by now
+              rt.receiveMessage(m)
+              None
+            } else if (Instance.lt((r + 5*nbrValues).toShort, m.instance)) {
+              //if we are really late we might stop here and start a new instance
+              rt.stopInstance(r) //TODO process Empty decision ?
+              instanceNbr = m.instance
+              canGo = true
+              Some(m)
+            } else {
+              Some(m)
+            }
+          case other => other
         }
-
       }
 
+      if (canGo) {
+        running(idx) = Some(instanceNbr)
+        val v = (idx << 16) | (value & 0xFFFF)
+        val io = new ConsensusIO {
+          val initialValue = v
+          //TODO we should reduce the amount of work done here: pass it to another thread and let the algorithm thread continue.
+          def decide(value: Int) {
+            //Logger("PerfTest", Notice, "(" + id + ") normal decision: instanceNbr " +  instanceNbr + ", value: " + value)
+            val first = processDecision(instanceNbr, value)
+            if (first) {
+              rt.submitTask( () => checkPending(idx) )
+            }
+          }
+        }
+        if (self) {
+          selfStarted add instanceNbr
+        }
+        //Logger("PerfTest", Notice, "(" + id + ") starting instance " + instanceNbr + " with " + idx + ", " + value + ", " + v + ", self " + self)
+        rt.startInstance(instanceNbr, io, msg)
+        if (self) wakeupOthers(instanceNbr, v)
+     
+      } else {
+        //Logger("PerfTest", Debug, "backing off " + idx)
+        //an instance is already running push the request to the backoff queue if it is one of our own query
+        if (self) {
+          backOff(idx).add(value)
+        }
+        for (m <- msg) {
+          m.release
+        }
+      }
+    
     } finally {
       l.unlock
     }
 
-    if (canGo) {
-      val v = (idx << 16) | (value & 0xFFFF)
-      val io = new ConsensusIO {
-        val initialValue = v
-        //TODO we should reduce the amount of work done here: pass it to another thread and let the algorithm thread continue.
-        def decide(value: Int) {
-          //Logger("PerfTest", Notice, "(" + id + ") normal decision: instanceNbr " +  instanceNbr + ", value: " + value)
-          val first = processDecision(instanceNbr, value)
-          if (first) {
-            rt.submitTask( () => checkPending(idx) )
-          }
-        }
-      }
-      if (self) {
-        selfStarted add instanceNbr
-      }
-      //Logger("PerfTest", Notice, "(" + id + ") starting instance " + instanceNbr + " with " + idx + ", " + value + ", " + v + ", self " + self)
-      rt.startInstance(instanceNbr, io, msg)
-      if (self) wakeupOthers(instanceNbr, v)
-
-    } else {
-      //Logger("PerfTest", Debug, "backing off " + idx)
-      //an instance is already running push the request to the backoff queue if it is one of our own query
-      if (self) {
-        backOff(idx).add(value)
-      }
-      for (m <- msg) {
-        m.release
-      }
-    }
   }
   
   def wakeupOthers(inst: Short, initValue: Int) {
@@ -298,12 +315,12 @@ class PerfTest2(options: RuntimeOptions,
 
   def checkPending(idx: Short) {
     val b = backOff(idx).poll
-    if (b != 0) start(idx, b, true, Set())
+    if (b != 0) start(idx, b, true, None)
   }
 
   def propose(idx: Short, value: Short) {
     rate.acquire
-    start(idx, value, true, Set())
+    start(idx, value, true, None)
   }
 
   def shutdown: Long = {

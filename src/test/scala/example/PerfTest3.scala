@@ -144,8 +144,9 @@ class PerfTest3(options: RuntimeOptions,
         val inst = msg.instance
         if (Instance.lt(started, inst)) {
           start(inst, emp, Set(msg))
+        } else if (inst == started){
+          rt.receiveMessage(msg)
         } else {
-          //TODO check if running and push to inst ?
           msg.release
         }
       } else if (flag == Decision) {

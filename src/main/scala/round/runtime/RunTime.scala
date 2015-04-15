@@ -17,21 +17,6 @@ class RunTime[IO](val alg: Algorithm[IO],
 
   private val processPool = new ArrayBlockingQueue[InstanceHandler[IO]](options.processPool)
 
-  private val executor = options.workers match {
-    case Factor(n) =>
-      val w = n * java.lang.Runtime.getRuntime().availableProcessors()
-      Logger("Runtime", Debug, "using fixed thread pool of size " + w)
-      java.util.concurrent.Executors.newFixedThreadPool(w)
-    case Fixed(n) =>
-      val w = n
-      Logger("Runtime", Debug, "using fixed thread pool of size " + w)
-      java.util.concurrent.Executors.newFixedThreadPool(w)
-    case Adapt => 
-      Logger("Runtime", Debug, "using cached thread pool")
-      java.util.concurrent.Executors.newCachedThreadPool()
-  }
-
-
   private var channelIdx = new AtomicInteger
   private def createProcess: InstanceHandler[IO] = {
     assert(srv.isDefined)
@@ -41,8 +26,7 @@ class RunTime[IO](val alg: Algorithm[IO],
     val idx = channelIdx.getAndIncrement.abs % channels.size
     val channel = channels(idx)
     val dispatcher = srv.get.dispatcher
-    val defaultHandler = srv.get.defaultHandler(_)
-    new InstanceHandler(p, this, channel, dispatcher, defaultHandler, options)
+    new InstanceHandler(p, this, channel, dispatcher, options)
   }
 
   private def getProcess: InstanceHandler[IO] = {
@@ -63,7 +47,7 @@ class RunTime[IO](val alg: Algorithm[IO],
   def startInstance(
       instanceId: Short,
       io: IO,
-      messages: Set[Message] = Set.empty)
+      messages: Iterable[Message] = None)
   {
     Logger("RunTime", Info, "starting instance " + instanceId)
     srv match {
@@ -79,8 +63,7 @@ class RunTime[IO](val alg: Algorithm[IO],
             false
           }
         })
-        process.prepare(io, grp, instanceId, messages2)
-        submitTask(process)
+        process.start(io, grp, instanceId, messages2)
       case None =>
         sys.error("service not running")
     }
@@ -91,7 +74,7 @@ class RunTime[IO](val alg: Algorithm[IO],
     Logger("RunTime", Info, "stopping instance " + instanceId)
     srv match {
       case Some(s) =>
-        s.dispatcher.findInstance(instanceId).map(_.interrupt(instanceId))
+        s.dispatcher.findInstance(instanceId).map(_.stop(instanceId))
       case None =>
         sys.error("service not running")
     }
@@ -113,7 +96,7 @@ class RunTime[IO](val alg: Algorithm[IO],
       if (grp contains me) grp.get(me).ports
       else Set(options.port)
     Logger("RunTime", Info, "starting service on ports: " + ports.mkString(", "))
-    val pktSrv = new PacketServer(executor, ports, grp, defaultHandler, options)
+    val pktSrv = new PacketServer(ports, grp, defaultHandler, options)
     srv = Some(pktSrv)
     pktSrv.start
     for (i <- 0 until options.processPool) processPool.offer(createProcess)
@@ -124,21 +107,33 @@ class RunTime[IO](val alg: Algorithm[IO],
       case Some(s) =>
         Logger("RunTime", Info, "stopping service")
         s.close
-        executor.shutdownNow
       case None =>
     }
     srv = None
   }
   
   def submitTask(fct: Runnable) = {
-    executor.execute(fct)
+    srv.get.executor.execute(fct)
   }
 
 
   def submitTask(fct: () => Unit) = {
-    executor.execute(new Runnable{
+    srv.get.executor.execute(new Runnable{
       def run = fct()
     })
+  }
+  
+  def receiveMessage(msg: Message, withDefault: Boolean = false) = {
+    srv.get.dispatcher.findInstance(msg.instance) match {
+      case Some(inst) =>
+        if (!inst.processPacket(msg.packet)) {
+          if (withDefault) defaultHandler(msg)
+          else msg.release
+        }
+      case None =>
+        if (withDefault) defaultHandler(msg)
+        else msg.release
+    }
   }
 
   /** the first 8 bytes of the payload must be empty */

@@ -81,14 +81,11 @@ class InstanceDispatcher(options: RuntimeOptions)
     }
   }
 
-  def dispatch(pkt: DatagramPacket) = {
-    val tag = Message.getTag(pkt.content)
-    findInstance(tag.instanceNbr) match {
-      case Some(inst) =>
-        inst.newPacket(pkt)
-        true
-      case None =>
-        false
+  def foreach(fct: InstHandler => Unit) {
+    var i = 0
+    while (i < n) {
+      instances(i).foreach{ case (_, x) => fct(x) }
+      i += 1
     }
   }
 

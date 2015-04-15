@@ -15,9 +15,9 @@ import io.netty.channel.socket.oio._
 import io.netty.channel.ChannelHandler.Sharable
 import io.netty.bootstrap.Bootstrap
 import java.net.InetSocketAddress
+import java.util.concurrent.TimeUnit
 
 class PacketServer(
-    executor: java.util.concurrent.Executor,
     ports: Iterable[Int],
     initGroup: Group,
     _defaultHandler: Message => Unit, //defaultHandler is responsible for releasing the ByteBuf payload
@@ -34,10 +34,26 @@ class PacketServer(
   Logger.assert(options.protocol == NetworkProtocol.UDP, "PacketServer", "transport layer: only UDP supported for the moment")
 
   private val group: EventLoopGroup = options.group match {
-    case NetworkGroup.NIO => new NioEventLoopGroup()
-    case NetworkGroup.OIO => new OioEventLoopGroup()
-    case NetworkGroup.EPOLL => new EpollEventLoopGroup()
+    case NetworkGroup.NIO   => nbrThread.map( n => new NioEventLoopGroup(n) ).getOrElse( new NioEventLoopGroup() )
+    case NetworkGroup.OIO   => nbrThread.map( n => new OioEventLoopGroup(n) ).getOrElse( new OioEventLoopGroup() )
+    case NetworkGroup.EPOLL => nbrThread.map( n => new EpollEventLoopGroup(n) ).getOrElse( new EpollEventLoopGroup() )
   }
+  private def nbrThread = options.workers match {
+    case Factor(n) =>
+      val w = n * java.lang.Runtime.getRuntime().availableProcessors()
+      Logger("PacketServer", Debug, "using fixed thread pool of size " + w)
+      Some(w)
+    case Fixed(n) =>
+      Logger("PacketServer", Debug, "using fixed thread pool of size " + n)
+      Some(n)
+    case Adapt => 
+      Logger("PacketServer", Debug, "using cached thread pool")
+      None
+  }
+
+
+
+  def executor: java.util.concurrent.Executor = group
 
   private var chans: Array[Channel] = null
   def channels: Array[Channel] = chans
@@ -58,6 +74,12 @@ class PacketServer(
     }
   }
 
+  private val checkTO = new Runnable {
+    def run {
+      dispatcher.foreach( (x: InstHandler) => x.checkTO )
+    }
+  }
+
   def start {
     val packetSize = options.packetSize
     val b = new Bootstrap()
@@ -73,28 +95,38 @@ class PacketServer(
       b.option(ChannelOption.RCVBUF_ALLOCATOR, new FixedRecvByteBufAllocator(packetSize))
     }
 
-    b.handler(new PackerServerHandler(defaultHandler, dispatcher))
+    b.handler(new PackerServerHandler(options.id, defaultHandler, dispatcher))
 
     val ps = ports.toArray
     chans = ps.map( p => b.bind(p).sync().channel() )
+    
+    group.scheduleAtFixedRate(checkTO, 0, options.timeout, TimeUnit.MILLISECONDS)
   }
 
 }
 
 @Sharable
 class PackerServerHandler(
+    id: Short,
     defaultHandler: DatagramPacket => Unit,
     dispatcher: InstanceDispatcher
   ) extends SimpleChannelInboundHandler[DatagramPacket](false) {
 
   //in Netty version 5.0 will be called: channelRead0 will be messageReceived
   override def channelRead0(ctx: ChannelHandlerContext, pkt: DatagramPacket) {
+    val tag = Message.getTag(pkt.content)
     try {
-    if (!dispatcher.dispatch(pkt))
-      defaultHandler(pkt) 
+      dispatcher.findInstance(tag.instanceNbr) match {
+        case Some(inst) =>
+          if (!inst.processPacket(pkt)) {
+            defaultHandler(pkt)
+          }
+        case None =>
+          defaultHandler(pkt) 
+      }
     } catch {
       case t: Throwable =>
-        Logger("PacketServerHandler", Warning, "got " + t)
+        Logger("PacketServerHandler", Warning, id + "@" + tag.instanceNbr + " got " + t + "\n  " + t.getStackTrace.mkString("\n  "))
     }
   }
 

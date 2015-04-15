@@ -11,7 +11,6 @@ import java.util.concurrent.TimeUnit
 
 
 //TODO what should be the interface ?
-//- val lock = new java.util.concurrent.locks.ReentrantLock
 //- @volatile var roundStart: Long
 //- var roundDuration: Long //TO is roundStart+roundDuration
 //- def newPacket(dp: DatagramPacket): Unit
@@ -29,25 +28,29 @@ import java.util.concurrent.TimeUnit
 //  - step increment/decrement
 //  - fixed
 //TODO if making a TCP RT we cannot use DatagramPacket anymore ?
+
 trait InstHandler {
-  def newPacket(dp: DatagramPacket): Unit
-  def interrupt(inst: Int): Unit
+  //def newPacket(dp: DatagramPacket): Unit
+  val lock = new java.util.concurrent.locks.ReentrantLock
+  //def start: Unit
+  def processPacket(dp: DatagramPacket): Boolean
+  def stop(inst: Int): Unit
+  def checkTO: Unit
+  //def interrupt(inst: Int): Unit
 }
 
 class InstanceHandler[IO](proc: Process[IO],
                           rt: round.runtime.RunTime[IO],
                           channel: Channel,
                           dispatcher: InstanceDispatcher,
-                          defaultHandler: DatagramPacket => Unit,
-                          options: RuntimeOptions) extends Runnable with InstHandler {
+                          options: RuntimeOptions) extends InstHandler {
   
-  protected val buffer = new ArrayBlockingQueue[DatagramPacket](options.bufferSize) 
+  //protected val buffer = new ArrayBlockingQueue[DatagramPacket](options.bufferSize) 
   
   protected var timeout = options.timeout
-  
   protected val adaptative = options.adaptative
-  
   protected var didTimeOut = 0
+  @volatile protected var roundStarted = 0l
 
   protected var instance: Short = 0
   protected var grp: Group = null
@@ -61,19 +64,6 @@ class InstanceHandler[IO](proc: Process[IO],
   protected var received = 0
   
 
-  /** A new packet is received and should be processed */
-  def newPacket(dp: DatagramPacket) = {
-    if (!buffer.offer(dp)) {
-      Logger("InstanceHandler", Warning, "too many packets")
-      dp.release
-    }
-  }
-  
-  /** Forward the packet to the defaultHandler */
-  protected def default(pkt: DatagramPacket) {
-    rt.submitTask(new Runnable { def run = defaultHandler(pkt) })
-  }
-  
   /** Allocate new buffers if needed */
   protected def checkResources {
     if (messages == null || messages.size != n) {
@@ -88,13 +78,13 @@ class InstanceHandler[IO](proc: Process[IO],
 
   /** Prepare the handler for a execution.
    *  call this just before giving it to the executor */
-  def prepare(io: IO, g: Group, inst: Short, msgs: Set[Message]) {
+  def prepare(io: IO, g: Group, inst: Short) {
     //clear the buffer
-    var pkt = buffer.poll
-    while(pkt != null) {
-      pkt.release
-      pkt = buffer.poll
-    }
+  //var pkt = buffer.poll
+  //while(pkt != null) {
+  //  pkt.release
+  //  pkt = buffer.poll
+  //}
     freeRemainingMessages
 
     instance = inst
@@ -107,9 +97,7 @@ class InstanceHandler[IO](proc: Process[IO],
     received = 0
     expected = n
     checkResources
-
-    msgs.foreach(p => newPacket(p.packet))
-    dispatcher.add(inst, this)
+    didTimeOut = 0
   }
   
   protected def freeRemainingMessages {
@@ -126,6 +114,7 @@ class InstanceHandler[IO](proc: Process[IO],
 
   protected def stop {
     Logger("InstanceHandler", Info, "stopping instance " + instance)
+    again = false
     dispatcher.remove(instance)
     freeRemainingMessages
     rt.recycle(this)
@@ -133,80 +122,146 @@ class InstanceHandler[IO](proc: Process[IO],
 
   protected var again = true
 
-  def interrupt(inst: Int) {
-    if (instance == inst)
-      again = false
-  }
-
-  def run {
+  def start(io: IO, g: Group, inst: Short, msgs: Iterable[Message]) {
+    Logger("InstanceHandler", Info, "starting instance " + inst)
+    lock.lock
+    prepare(io, g, inst)
+    dispatcher.add(inst, this)
+    again = true
     try {
-      Logger("InstanceHandler", Info, "starting instance " + instance)
-      again = true
-      send //TODO might already stop here
-      while(again && !Thread.interrupted()) {
-        val msg = buffer.poll(timeout, TimeUnit.MILLISECONDS)
-        if (msg != null) {
-          didTimeOut -= 1
-          //TODO this should return: ok, not received, or stopping
-          if(!messageReceived(msg))
-            default(msg)
-        } else {
-          //Logger("InstanceHandler", Warning, instance + " timeout")
-          didTimeOut += 1
-          deliver
-        }
-        if (adaptative) {
-          //TODO something amortized to avoid oscillations
-          if (didTimeOut > 5) {
-            didTimeOut = 0
-            timeout += 10
-          } else if (didTimeOut < -50) {
-            didTimeOut = 0
-            timeout -= 10
-          }
-        }
-      }
+      send
+      msgs.foreach(p => processPacket(p.packet))
+      if (!again) stop
     } catch {
-      case _: TerminateInstance | _: java.lang.InterruptedException => ()
+      case _: TerminateInstance | _: java.lang.InterruptedException =>
+        stop
       case t: Throwable =>
         Logger("InstanceHandler", Error, "got an error " + t + " terminating instance: " + instance + "\n  " + t.getStackTrace.mkString("\n  "))
+        stop
     } finally {
-      stop
+      lock.unlock
     }
   }
   
+  def stop(inst: Int) {
+    lock.lock
+    try {
+      if (inst == instance)
+        stop
+    } finally {
+      lock.unlock
+    }
+  }
+
+  def processPacket(msg: DatagramPacket): Boolean = {
+    var processed = false
+    lock.lock
+    try {
+      if (again) {
+        processed = messageReceived(msg)
+        if (!again)
+          stop
+      }
+    } catch {
+      case _: TerminateInstance | _: java.lang.InterruptedException =>
+        stop
+      case t: Throwable =>
+        Logger("InstanceHandler", Error, "got an error " + t + " terminating instance: " + instance + "\n  " + t.getStackTrace.mkString("\n  "))
+        stop
+    } finally {
+      lock.unlock
+    }
+    processed
+  }
+
+  def checkTO {
+    val now = java.lang.System.currentTimeMillis
+    if ((now - roundStarted) > timeout) {
+      lock.lock
+      if ((now - roundStarted) > timeout) {
+        try {
+          didTimeOut += 1
+          if(again) {
+            //Logger("InstanceHandler", Warning, instance + " timeout")
+            deliver
+            if(!again)
+              stop
+          }
+        } catch {
+          case _: TerminateInstance | _: java.lang.InterruptedException => ()
+          case t: Throwable =>
+            Logger("InstanceHandler", Error, "got an error " + t + " terminating instance: " + instance + "\n  " + t.getStackTrace.mkString("\n  "))
+        } finally {
+          lock.unlock
+        }
+      } else {
+        didTimeOut -= 1
+        lock.unlock
+      }
+    } else {
+      didTimeOut -= 1
+    }
+    if (adaptative) {
+      //TODO something amortized to avoid oscillations
+      if (didTimeOut > 5) {
+        didTimeOut = 0
+        timeout += 10
+      } else if (didTimeOut < -50) {
+        didTimeOut = 0
+        timeout -= 10
+      }
+    }
+  }
+
   ///////////////////
   // current round //
   ///////////////////
-  
-  //general receive (not sure if it is the correct round, instance, etc.).
-  protected def receive(pkt: DatagramPacket) {
+
+  protected def messageReceived(pkt: DatagramPacket) = {
     val tag = Message.getTag(pkt.content)
-    val round = tag.roundNbr
-    if (instance != tag.instanceNbr) {
+    if (instance != tag.instanceNbr) { //much later
       pkt.release
+      true
+    } else if (tag.flag == Flags.normal) {
+      receive(tag, pkt)
+      true
+    } else if (tag.flag == Flags.dummy) {
+      Logger("InstanceHandler", Debug, grp.self.id + ", " + instance + " messageReceived: dummy flag (ignoring)")
+      pkt.release
+      true
+    } else if (tag.flag == Flags.error) {
+      Logger("InstanceHandler", Warning, "messageReceived: error flag (pushing to user)")
+      false
     } else {
-      try {
-        while(round - currentRound > 0) {
-          //println(grp.self.id + ", " + tag.instanceNbr + " catching up: " + currentRound + " -> " + round)
-          deliver
-        }
-      } catch {
-        case t: Throwable =>
-          pkt.release
-          throw t
-      }
-      if (round == currentRound) {
-        //println(grp.self.id + ", " + tag.instanceNbr + " delivering: " + currentRound)
-        //normal case
-        storePacket(pkt)
-        if (received >= expected) {
-          deliver
-        }
-      } else {
-        pkt.release //packet late
-      }
+      //Logger("Predicate", Warning, "messageReceived: unknown flag -> " + tag.flag + " (ignoring)")
+      false
     }
+  }
+  
+  protected def receive(tag: Tag, pkt: DatagramPacket) {
+    val round = tag.roundNbr
+    assert(instance == tag.instanceNbr)
+    try {
+      while(round - currentRound > 0) {
+        //println(grp.self.id + ", " + tag.instanceNbr + " catching up: " + currentRound + " -> " + round)
+        deliver
+      }
+    } catch {
+      case t: Throwable =>
+        pkt.release
+        throw t
+    }
+    if (round == currentRound) {
+      //println(grp.self.id + ", " + tag.instanceNbr + " delivering: " + currentRound)
+      //normal case
+      storePacket(pkt)
+      if (received >= expected) {
+        deliver
+      }
+    } else {
+      pkt.release //packet late
+    }
+    
   }
 
   protected def storePacket(pkt: DatagramPacket) {
@@ -215,14 +270,14 @@ class InstanceHandler[IO](proc: Process[IO],
       from(id) = true
       messages(received) = pkt
       received += 1
-      assert(Message.getTag(pkt.content).roundNbr == currentRound, Message.getTag(pkt.content).roundNbr + " vs " + currentRound)
+      //assert(Message.getTag(pkt.content).roundNbr == currentRound, Message.getTag(pkt.content).roundNbr + " vs " + currentRound)
     } else {
       pkt.release
     }
   }
   
   protected def deliver {
-    Logger("Predicate", Debug, grp.self.id + ", " + instance + " delivering for round " + currentRound + " (received = " + received + ")")
+    Logger("InstanceHandler", Debug, grp.self.id + ", " + instance + " delivering for round " + currentRound + " (received = " + received + ")")
     val toDeliver = messages.slice(0, received)
     val msgs = fromPkts(toDeliver)
     currentRound += 1
@@ -234,8 +289,7 @@ class InstanceHandler[IO](proc: Process[IO],
       //start the next round (if has not exited)
       send
     } else {
-      //TODO better!!
-      throw new TerminateInstance
+      again = false
     }
   }
   
@@ -264,29 +318,9 @@ class InstanceHandler[IO](proc: Process[IO],
       }
     }
     channel.flush
+    roundStarted = java.lang.System.currentTimeMillis
     if (received >= expected) {
       deliver
-    }
-  }
-
-  protected def messageReceived(pkt: DatagramPacket) = {
-    val tag = Message.getTag(pkt.content)
-    if (instance != tag.instanceNbr) {
-      pkt.release
-      true
-    } else if (tag.flag == Flags.normal) {
-      receive(pkt)
-      true
-    } else if (tag.flag == Flags.dummy) {
-      Logger("Predicate", Debug, grp.self.id + ", " + instance + " messageReceived: dummy flag (ignoring)")
-      pkt.release
-      true
-    } else if (tag.flag == Flags.error) {
-      Logger("Predicate", Warning, "messageReceived: error flag (pushing to user)")
-      false
-    } else {
-      //Logger("Predicate", Warning, "messageReceived: unknown flag -> " + tag.flag + " (ignoring)")
-      false
     }
   }
     
