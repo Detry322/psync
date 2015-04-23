@@ -71,7 +71,13 @@ class InstanceDispatcher(options: RuntimeOptions)
 
   def findInstance(inst: Int): Option[InstHandler] = {
     val i = index(inst)
-    instances(i).find( p => p._1 == inst).map(_._2)
+    //val l = locks(i)
+    //l.lock()
+    //try {
+      instances(i).find( p => p._1 == inst).map(_._2)
+    //} finally {
+    //  l.unlock()
+    //}
   }
 
   /** remove all the instances from the dispatch table */

@@ -17,7 +17,6 @@ import io.netty.bootstrap.Bootstrap
 import java.net.InetSocketAddress
 
 class PacketServer(
-    executor: java.util.concurrent.Executor,
     ports: Iterable[Int],
     initGroup: Group,
     _defaultHandler: Message => Unit, //defaultHandler is responsible for releasing the ByteBuf payload
@@ -34,10 +33,24 @@ class PacketServer(
   Logger.assert(options.protocol == NetworkProtocol.UDP, "PacketServer", "transport layer: only UDP supported for the moment")
 
   private val group: EventLoopGroup = options.group match {
-    case NetworkGroup.NIO => new NioEventLoopGroup()
-    case NetworkGroup.OIO => new OioEventLoopGroup()
-    case NetworkGroup.EPOLL => new EpollEventLoopGroup()
+    case NetworkGroup.NIO   => nbrThread.map( n => new NioEventLoopGroup(n) ).getOrElse( new NioEventLoopGroup() )
+    case NetworkGroup.OIO   => nbrThread.map( n => new OioEventLoopGroup(n) ).getOrElse( new OioEventLoopGroup() )
+    case NetworkGroup.EPOLL => nbrThread.map( n => new EpollEventLoopGroup(n) ).getOrElse( new EpollEventLoopGroup() )
   }
+  private def nbrThread = options.workers match {
+    case Factor(n) =>
+      val w = n * java.lang.Runtime.getRuntime().availableProcessors()
+      Logger("PacketServer", Debug, "using fixed thread pool of size " + w)
+      Some(w)
+    case Fixed(n) =>
+      Logger("PacketServer", Debug, "using fixed thread pool of size " + n)
+      Some(n)
+    case Adapt => 
+      Logger("PacketServer", Debug, "using netty default thread pool")
+      None
+  }
+
+  def executor: java.util.concurrent.ScheduledExecutorService = group
 
   private var chans: Array[Channel] = null
   def channels: Array[Channel] = chans
