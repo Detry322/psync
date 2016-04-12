@@ -15,6 +15,7 @@ import io.netty.channel.socket.oio._
 import io.netty.channel.ChannelHandler.Sharable
 import io.netty.bootstrap.Bootstrap
 import java.net.InetSocketAddress
+import java.util.concurrent.atomic.AtomicInteger
 
 class TCPPacketServer(
     executor: java.util.concurrent.Executor,
@@ -25,6 +26,21 @@ class TCPPacketServer(
 {
 
   private var recipientMap: Map[ProcessID, Channel] = Map()
+
+  private var pid = new AtomicInteger
+
+  def getProcessID(): ProcessID {
+    var newPid = pid.getAndAdd(1)
+    var myPid = initGroup.self.id
+    if (newPid >= myPid) {
+      newPid += 1
+    }
+    ProcessID(newPid)
+  }
+
+  def addChannel(pid: ProcessID, chan: Channel) {
+    recipientMap(pid) = chan
+  }
 
   def defaultHandler(pkt: DatagramPacket) {
     val msg = new Message(pkt, directory.group)
@@ -67,6 +83,8 @@ class TCPPacketServer(
     // b.handler(new TCPPacketServerHandler(defaultHandler, dispatcher))
 
     // chan = b.bind(port).sync().channel()
+    Logger("TCPPacketServer", Info, "Sleeping for 3 seconds to wait for connections")
+    Thread.sleep(3000) // Sleep for 3 seconds to wait for connection setup
   }
 
   def send(pkt: DatagramPacket) {
