@@ -11,7 +11,7 @@ object NetworkGroup extends Enumeration {
 
 object NetworkProtocol extends Enumeration {
   type NetworkProtocol = Value
-  val UDP, TCP = Value
+  val UDP, TCP, TCP_SSL = Value
 }
 
 sealed abstract class Workers
@@ -20,7 +20,7 @@ case class Fixed(nbr: Int) extends Workers
 case class Factor(coeff: Int) extends Workers
 
 trait RuntimeOptions {
-  
+
   def id = _id
   def peers = _peers
   def group = _group
@@ -56,7 +56,7 @@ trait RuntimeOptions {
 abstract class RTOptions extends DefaultOptions with RuntimeOptions {
 
   import dzufferey.arg._
-  
+
   newOption("--conf",                   String( s => processConFile(s)),            "configuration file")
   newOption("-id",                      Int( i => _id = i.toShort),                 "the replica ID")
   newOption("--id",                     Int( i => _id = i.toShort),                 "the replica ID")
@@ -94,15 +94,16 @@ abstract class RTOptions extends DefaultOptions with RuntimeOptions {
       Logger("RuntimeOptions", Warning, "NetworkGroup, unknown '"+other+"' using NIO")
       NetworkGroup.NIO
   }
-  
+
   def parseProtocol(s: java.lang.String) = s.toLowerCase match {
     case "udp" => NetworkProtocol.UDP
     case "tcp" => NetworkProtocol.TCP
+    case "tcp_ssl" => NetworkProtocol.TCP_SSL
     case other =>
       Logger("RuntimeOptions", Warning, "NetworkProtocol, unknown '"+other+"' using UDP")
       NetworkProtocol.UDP
   }
-  
+
   def parseWorkers(s: java.lang.String) = {
     val n = s.toLowerCase
     try {
@@ -112,7 +113,7 @@ abstract class RTOptions extends DefaultOptions with RuntimeOptions {
     } catch {
       case e: Exception =>
         Logger("RuntimeOptions", Warning, "size of pool of workers has wrong format, using adaptative")
-        Adapt 
+        Adapt
     }
   }
 
