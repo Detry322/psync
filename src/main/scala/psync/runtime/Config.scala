@@ -6,9 +6,14 @@ import psync._
 object Config {
 
   private def parseReplica(e: Node) = {
+    val sslOption = e.find(_.label == "ssl").map{ node =>
+      CertificateInfo( (node \ "cert").text, (node \ "key").text)
+    }
+
     Replica(new ProcessID((e \ "id").text.toShort),
             (e \ "address").text,
-            (e \\ "port").map(_.text.toInt).toSet)
+            (e \\ "port").map(_.text.toInt).toSet,
+            sslOption)
   }
 
   private def parseOption(e: Node): (String, String) = {

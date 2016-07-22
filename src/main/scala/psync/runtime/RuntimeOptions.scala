@@ -14,6 +14,8 @@ object NetworkProtocol extends Enumeration {
   val UDP, TCP, TCP_SSL = Value
 }
 
+case class CertificateInfo(certificateFile: String, privateKeyFile: String)
+
 sealed abstract class Workers
 case object Adapt extends Workers
 case class Fixed(nbr: Int) extends Workers
@@ -35,6 +37,7 @@ trait RuntimeOptions {
   def workers = _workers
   def port = _port
   def dispatch = _dispatch
+  def rootCA = _rootCA
 
   protected var _peers = List[Replica]()
   protected var _id: Short = -1
@@ -50,6 +53,7 @@ trait RuntimeOptions {
   protected var _workers: Workers = Adapt
   protected var _port = -1
   protected var _dispatch = 7
+  protected var _rootCA: Option[String] = None
 
 }
 
@@ -75,6 +79,7 @@ abstract class RTOptions extends DefaultOptions with RuntimeOptions {
   newOption("--workers",                String( s => _workers = parseWorkers(s) ),  "number of workers: adaptative/\\d(fixed)/\\dx(coeff on #CPU) (default: adaptative).")
   newOption("--port",                   Int( i => _port = i ),                      "port number, in case we don't know which replica we are.")
   newOption("--dispatch",               Int( i => _dispatch = i ),                  "log₂ fan out of the dispatcher (default: 7).")
+  newOption("--rootCA",                 String( s => _rootCA = Some(s)),            "The file location of the root certificate")
 
   def processConFile(s: java.lang.String) {
     val (ps, opts) = Config.parse(s)
