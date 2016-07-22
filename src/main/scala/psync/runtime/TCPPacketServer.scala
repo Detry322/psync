@@ -28,7 +28,8 @@ class TCPPacketServer(
     port: Int,
     val initGroup: Group,
     _defaultHandler: Message => Unit, //defaultHandler is responsible for releasing the ByteBuf payload
-    options: RuntimeOptions) extends PacketServer(executor, port, initGroup, _defaultHandler, options)
+    options: RuntimeOptions,
+    certInfo: Option[CertificateInfo]) extends PacketServer(executor, port, initGroup, _defaultHandler, options)
 {
 
   val recipientMap: Map[Short, Channel] = new TrieMap[Short, Channel]// with SynchronizedMap[ProcessID, Channel]
@@ -45,12 +46,22 @@ class TCPPacketServer(
   private val isSSLEnabled = (options.protocol == NetworkProtocol.TCP_SSL)
 
   private val sslServerCtx = if (isSSLEnabled) {
-    val ssc = new SelfSignedCertificate()
-    SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey()).build();
+    if (options.rootCA.isDefined) {
+
+    } else {
+      Logger("TCPPacketServer", Warning, "No certificates provided, using self-signed certs... (insecure)")
+      val ssc = new SelfSignedCertificate()
+      SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey()).build();
+    }
   } else null
 
   private val sslClientCtx = if (isSSLEnabled) {
-    SslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE).build();
+    if (options.rootCA.isDefined) {
+      SslContextBuilder.forClient()
+        .trustManager(new File())
+    } else {
+      SslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE).build();
+    }
   } else null
 
   private val group: EventLoopGroup = new NioEventLoopGroup()

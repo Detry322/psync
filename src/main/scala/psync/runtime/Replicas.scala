@@ -6,7 +6,7 @@ import dzufferey.utils.LogLevel._
 
 import java.net.InetSocketAddress
 
-case class Replica(id: ProcessID, address: String, ports: Set[Int]) {
+case class Replica(id: ProcessID, address: String, ports: Set[Int], cert: Option[CertificateInfo]) {
   assert(!ports.isEmpty, "replica cannot have an empty list of ports")
 
   lazy val netAddresses = ports.toArray.map( p => new InetSocketAddress(address, p) )
@@ -32,7 +32,7 @@ class Group(val self: ProcessID, val replicas: Array[Replica]) {
         throw e
     }
   }
-  
+
   def get(pid: ProcessID): Replica = replicas(pid.id)
 
   //TODO a map ?
@@ -45,7 +45,7 @@ class Group(val self: ProcessID, val replicas: Array[Replica]) {
   def idToInet(pid: ProcessID) = {
     replicas(pid.id).netAddress
   }
-  
+
   def idToInet(pid: ProcessID, i: Int) = {
     replicas(pid.id).netAddress(i)
   }
@@ -96,7 +96,7 @@ class Group(val self: ProcessID, val replicas: Array[Replica]) {
     }
     new ProcessID(replicas.size.toShort)
   }
-    
+
   def asList = replicas.toList.filter(_ != null)
 
   override def toString = {
@@ -138,13 +138,13 @@ class Directory(private var g: Group) {
   }
 
   def self = g.self
-  
+
   def others = g.others
 
   def group = g
 
   def group_=(grp: Group) = sync{ g = grp }
-  
+
   def contains(pid: ProcessID) = g.contains(pid)
 
   def getSafe(address: InetSocketAddress) = g.getSafe(address)
@@ -154,7 +154,7 @@ class Directory(private var g: Group) {
   def get(address: InetSocketAddress) = g.get(address)
 
   def idToInet(processId: ProcessID) = g.idToInet(processId)
-  
+
   def idToInet(processId: ProcessID, i: Int) = g.idToInet(processId, i)
 
   def idToInets(processId: ProcessID) = g.idToInets(processId)
@@ -166,9 +166,9 @@ class Directory(private var g: Group) {
   def removeReplica(id: ProcessID) = sync{ g = g.remove(id) }
 
   def compact = sync{ g = g.compact }
-  
+
   def firstAvailID = g.firstAvailID
-  
+
   def asList = g.asList
 
   override def toString = g.toString
